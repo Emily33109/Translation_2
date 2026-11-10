@@ -1496,7 +1496,7 @@ function viewNoRoster() {
 /* ===================== 離線 AI（WebLLM，在瀏覽器內執行） ===================== */
 const AI = {
   webllm: null, engine: null, status: "idle", pct: 0, text: "", modelId: "", selected: MODEL_F32,
-  busy: false, env: null, live: "", liveFor: null, stop: false,
+  busy: false, env: null, live: "", liveFor: null, stop: false, models: [],
   conv: null, convTried: false, cached: false,
   test: { state: "idle", out: "", sec: 0, ok: false }, prepLang: "en"
 };
@@ -1566,12 +1566,26 @@ async function colabConnect() {
   if (r.status === 401) throw new Error("API 金鑰不正確，請確認網站設定區的 COLAB_API_KEY 和 Colab Secrets 裡的 LLAMA_API_KEY 一樣。");
   if (!r.ok) throw new Error("Colab 伺服器回應錯誤（" + r.status + "）。可能還在啟動中，請稍後再試。");
   const j = await r.json().catch(() => ({}));
-  const id = j && j.data && j.data[0] && j.data[0].id;
-  return String(id || "colab-model").split("/").pop();
+  const ids = ((j && j.data) || []).map((m) => String((m && m.id) || "").split("/").pop()).filter(Boolean);
+  return ids.length ? ids : ["colab-model"];
+}
+/* 學生選的模型：記在這台電腦，下次打開還是同一個 */
+const MODEL_PICK_KEY = "trans-colab-model";
+function pickModel(id) {
+  if (!AI.models.includes(id)) return;
+  AI.modelId = id;
+  AI.text = "已連線：" + id;
+  try { localStorage.setItem(MODEL_PICK_KEY, id); } catch (e) {}
+  rr();
+}
+function modelSelect(id) {
+  if (!IS_COLAB || AI.sim || AI.status !== "ready" || AI.models.length < 2) return null;
+  return h("select", { id, value: AI.modelId, disabled: AI.busy, title: "選擇要使用的 AI 模型", style: "width:auto;font-size:13px;padding:2px 8px", onchange: (e) => pickModel(e.target.value) },
+    AI.models.map((m) => h("option", { value: m }, m)));
 }
 /* 把串流回應轉成和 WebLLM 一樣格式的片段 */
 async function* colabStream(req) {
-  const body = Object.assign({}, req);
+  const body = Object.assign({}, req, { model: AI.modelId });
   delete body.extra_body;
   const r = await fetch(COLAB_API_URL.replace(/\/$/, "") + "/chat/completions", { method: "POST", headers: colabHeaders(), body: JSON.stringify(body) });
   if (!r.ok) {
@@ -1646,7 +1660,10 @@ async function aiLoad(id) {
     AI.status = "loading"; AI.pct = 30; AI.text = "連線到 Colab 伺服器…"; rr();
     await new Promise((r) => setTimeout(r, 600)); // 讓「連線中」至少顯示一下
     try {
-      AI.modelId = await colabConnect();
+      AI.models = await colabConnect();
+      let saved = "";
+      try { saved = localStorage.getItem(MODEL_PICK_KEY) || ""; } catch (e) {}
+      AI.modelId = AI.models.includes(saved) ? saved : AI.models[0];
       AI.sim = false;
       AI.status = "ready"; AI.pct = 100; AI.text = "已連線：" + AI.modelId;
     } catch (e) {
@@ -1814,9 +1831,11 @@ function viewPrepColab() {
       h("div", { class: "btns" }, h("button", { disabled: AI.status === "loading", onclick: () => aiLoad() }, AI.status === "ready" ? "重新連線" : "連線到 Colab")),
       h("div", { class: "bar" }, h("div", { id: "ai-bar", style: "width:" + AI.pct + "%" })),
       h("div", { class: AI.status === "error" ? "card bad" : "mono", id: "ai-status" }, AI.text || "尚未連線"),
-      AI.status === "ready" ? h("span", { class: "badge " + (AI.sim ? "warn" : "ok"), style: "align-self:flex-start" }, AI.sim ? "示範模擬 AI（未連到 Colab）" : "已連線，模型：" + AI.modelId) : null),
+      AI.status === "ready" ? h("span", { class: "badge " + (AI.sim ? "warn" : "ok"), style: "align-self:flex-start" }, AI.sim ? "示範模擬 AI（未連到 Colab）" : "已連線，可用模型：" + AI.models.join("、")) : null),
     h("div", { class: "card" },
       h("h2", null, "步驟 3　測試翻譯"),
+      modelSelect("prep-model") ? h("label", { for: "prep-model" }, "要測試的模型") : null,
+      modelSelect("prep-model"),
       h("label", { for: "prep-lang" }, "要測試的目標語言（原文是中文）"),
       h("select", { id: "prep-lang", value: AI.prepLang, onchange: (e) => { AI.prepLang = e.target.value; AI.test = { state: "idle", out: "", sec: 0, ok: false }; rr(); } },
         LANG_KEYS.map((k) => h("option", { value: k }, LANGS[k].short))),
@@ -1828,7 +1847,7 @@ function viewPrepColab() {
       AI.test.state === "fail" ? h("div", { class: "card bad" }, AI.test.out) : null),
     h("div", { class: "card " + (ready ? "ok" : "") },
       h("h2", null, ready ? "網站可以使用 Colab AI" : "尚未準備好"),
-      h("p", null, ready ? "已連線到 Colab，測試翻譯也有產生目標語言的文字。請三種語言（英、日、德）都各測一次，並看譯文是否合理。" : "請依序完成上面三個步驟。")),
+      h("p", null, ready ? "已連線到 Colab，測試翻譯也有產生目標語言的文字。請每個模型、三種語言（英、日、德）都各測一次，並看譯文是否合理。" : "請依序完成上面三個步驟。")),
     h("div", { class: "card warn" },
       h("p", null, "Colab 閒置太久或執行太多小時會被中斷。中斷後要回到 notebook 重新執行第 4、5 格，再回這一頁按「重新連線」。"),
       h("p", null, "連不上時，依序檢查：Colab 是否還在跑、API 網址是否正確、COLAB_API_KEY 是否和 Colab Secrets 的 LLAMA_API_KEY 一樣。")),
@@ -2366,7 +2385,8 @@ function aiPanel(t) {
   const status = AI.status === "ready"
     ? h("span", { class: "badge " + (AI.sim ? "warn" : "ok") }, AI.sim ? "示範模擬 AI" : "已連線")
     : h("span", { class: "badge" + (AI.status === "error" ? " bad" : "") }, AI.status === "loading" ? "連線中…" : AI.status === "error" ? "連線失敗" : "未連線");
-  const head = h("div", { class: "aihead" }, h("span", { class: "mono" }, AI.modelId ? "模型：" + AI.modelId : (IS_COLAB ? "Colab 雲端 AI" : "離線 AI")), status);
+  const pick = modelSelect("ai-model");
+  const head = h("div", { class: "aihead" }, pick ? h("label", { class: "mono", for: "ai-model", style: "display:flex;align-items:center;gap:6px" }, "模型：", pick) : h("span", { class: "mono" }, AI.modelId ? "模型：" + AI.modelId : (IS_COLAB ? "Colab 雲端 AI" : "離線 AI")), status);
   const wrap = (...kids) => h("div", { class: "sidebody" }, head, ...kids);
   if (!env) return wrap(h("p", { class: "sub" }, "正在檢查…"));
   if (!env.webgpu || !env.adapter) return wrap(h("div", { class: "card bad" }, h("p", null, "這台電腦的瀏覽器不支援 WebGPU，無法使用 AI。你仍然可以自己翻譯並使用術語表。")));
@@ -2393,6 +2413,7 @@ function aiPanel(t) {
           h("span", { class: "meta" }, fmtShort(recMs(l)).slice(6))),
         h("div", { class: "msg a" },
           h("div", { class: "bub" }, l.response),
+          l.model && AI.models.length > 1 ? h("span", { class: "meta" }, l.model) : null,
           h("div", { class: "acts" },
             h("button", { class: "ghost sm", disabled: !mode, title: mode ? "" : "輪到你編輯時才能插入", onclick: () => insertText(l.response, "ai_insert", { detail: l.id, aiLogId: l.id }) }, "插入譯文"),
             h("button", { class: "plain sm", onclick: () => { navigator.clipboard && navigator.clipboard.writeText(l.response).then(() => toast("已複製", "ok"), () => toast("無法複製，請手動選取", "bad")); } }, "複製")))
@@ -2699,7 +2720,7 @@ async function startTeacher() {
     tab: "roster", sessions: [], anon: {}, consents: {}, roster: [], bank: [], gloss: [], reflections: [],
     viewSid: (S.settings && S.settings.activeSessionId) || "", data: null, loadingData: false,
     f: { group: "", role: "", task: "" }, cmpA: "", cmpB: "", cmpTask: "",
-    exp: { set: "events", fmt: "csv", off: {} }, bf: { id: "", title: "", text: "" },
+    exp: { set: "events", off: {} }, bf: { id: "", title: "", text: "" },
     nf: { name: "" }, rf: { email: "", name: "", group: "", lang: "", pm: false }, imp: "",
     seeds: [], groupRoles: [], sf: { lang: "en", src: "", tgt: "", trap: false }, simp: "", sl: "en"
   };
@@ -2931,160 +2952,243 @@ function analyzeFlow(task, allEvents) {
   return steps;
 }
 
-/* ---------- KPI 彙整（全部由系統已有的紀錄算出，不含主觀判斷） ---------- */
-const r1 = (x) => (x == null || isNaN(x) ? "" : Math.round(x * 10) / 10);
-function computeKpi(d) {
-  const sname = sessionName(S.T.viewSid);
-  const vBy = {};
-  d.versions.forEach((v) => { (vBy[v.taskId] = vBy[v.taskId] || []).push(v); });
-  const taskRows = d.tasks.map((t) => {
-    const vs = (vBy[t.id] || []).sort(byTime);
-    const evs = d.events.filter((e) => e.taskId === t.id);
-    const start = t.clientTime || recMs(t);
-    const end = t.status === "done" ? (tms(t.confirmedAt) || (vs.length ? recMs(vs[vs.length - 1]) : 0)) : 0;
-    const stepsDone = (t.plan || []).filter((x) => x.done).length;
-    return {
-      session: sname, groupId: t.groupId, taskCode: t.code, lang: t.lang, status: t.status,
-      sourceChars: (t.sourceText || "").length, finalChars: (t.finalText || "").length,
-      stepsPlanned: (t.initialPlan || []).length, stepsDone, versions: vs.length,
-      returns: t.reworkCount || 0, reworkRate: stepsDone ? r1((t.reworkCount || 0) / stepsDone * 100) : "",
-      planEdits: evs.filter((e) => e.type === "plan_edit").length, totalMin: end && start ? r1((end - start) / 60000) : ""
-    };
-  });
-  const people = {};
-  const P = (a, g) => (people[a] = people[a] || { session: sname, groupId: g, anonId: a, translate: 0, revise: 0, review: 0, final: 0, chars: 0, workMs: 0, turnMs: 0, pickMs: 0, pickN: 0, returns: 0, glossAdd: 0, glossEdit: 0, glossDel: 0, aiPrompts: 0, aiInserts: 0, glossInserts: 0 });
-  d.versions.forEach((v) => {
-    const p = P(v.anonId, v.groupId);
-    const kk = v.kind === "revise" ? "translate" : v.kind === "pmcheck" ? "final" : v.kind;
-    p[kk] = (p[kk] || 0) + 1;
-    p.chars += v.chars || (v.content || "").length;
-    const end = v.clientTime || recMs(v);
-    if (v.openedAt) p.workMs += Math.max(0, end - v.openedAt);
-    if (v.startedAt) p.turnMs += Math.max(0, end - v.startedAt);
-    if (v.startedAt && v.openedAt) { p.pickMs += Math.max(0, v.openedAt - v.startedAt); p.pickN++; }
-  });
-  d.events.forEach((e) => {
-    if (!e.anonId || e.type === "reflection") return;
-    const p = P(e.anonId, e.groupId);
-    if (e.type === "return") p.returns++;
-    if (e.type === "glossary_add") p.glossAdd++;
-    if (e.type === "glossary_edit") p.glossEdit++;
-    if (e.type === "glossary_delete") p.glossDel++;
-    if (e.type === "ai_insert") p.aiInserts++;
-    if (e.type === "glossary_insert") p.glossInserts++;
-  });
-  d.ai.forEach((l) => { P(l.anonId, l.groupId).aiPrompts++; });
-  const personRows = Object.values(people).map((p) => {
-    const hrs = p.workMs / 3600000;
-    return {
-      session: p.session, groupId: p.groupId, anonId: p.anonId, translateSteps: p.translate, reviewSteps: p.review, finalSteps: p.final,
-      versions: p.translate + p.review + p.final, charsHandled: p.chars, workMin: r1(p.workMs / 60000), turnaroundMin: r1(p.turnMs / 60000),
-      charsPerHour: hrs > 0 ? Math.round(p.chars / hrs) : "", avgPickupMin: p.pickN ? r1(p.pickMs / p.pickN / 60000) : "",
-      returnsIssued: p.returns, glossaryAdded: p.glossAdd, glossaryEdited: p.glossEdit, glossaryDeleted: p.glossDel,
-      aiPrompts: p.aiPrompts, aiInserts: p.aiInserts, glossaryInserts: p.glossInserts
-    };
-  }).sort((a, b) => (a.groupId + a.anonId).localeCompare(b.groupId + b.anonId));
-  const groups = [...new Set(d.tasks.map((t) => t.groupId))].sort();
-  const groupRows = groups.map((g) => {
-    const ts = taskRows.filter((x) => x.groupId === g);
-    const done = ts.filter((x) => x.status === "done");
-    const sum = (k) => ts.reduce((a, x) => a + (+x[k] || 0), 0);
-    const steps = sum("stepsDone");
-    return {
-      session: sname, groupId: g, tasks: ts.length, tasksDone: done.length, versions: sum("versions"), returns: sum("returns"),
-      reworkRate: steps ? r1(sum("returns") / steps * 100) : "", planEdits: sum("planEdits"),
-      avgTotalMin: done.length ? r1(done.reduce((a, x) => a + (+x.totalMin || 0), 0) / done.length) : "",
-      glossaryTerms: d.gloss.filter((x) => x.groupId === g).length,
-      glossaryAddedByStudents: d.events.filter((e) => e.groupId === g && e.type === "glossary_add").length
-    };
-  });
-  return { taskRows, personRows, groupRows };
-}
-/* 老師預放的術語：各組有沒有發現並處理 */
-function seedStatus(d) {
-  const T = S.T, out = [];
-  const groups = {};
-  T.roster.forEach((r) => { groups[r.groupId] = normLang(r.lang) || "en"; });
-  T.seeds.forEach((sd) => {
-    (sd.distributedTo || []).forEach((g) => {
-      const doc = d.gloss.find((x) => x.groupId === g && x.seedId === sd.id);
-      const ev = d.events.filter((e) => e.groupId === g && e.seedId === sd.id);
-      const del = ev.find((e) => e.type === "glossary_delete");
-      const ed = ev.filter((e) => e.type === "glossary_edit");
-      const st = doc ? (doc.tgt !== sd.tgt ? "已修改" : "未更動") : (del ? "已刪除" : "已不存在");
-      out.push({ session: sessionName(T.viewSid), groupId: g, lang: sd.lang, src: sd.src, seededTgt: sd.tgt, trap: sd.trap ? "是（故意放錯）" : "否", status: st, currentTgt: doc ? doc.tgt : "", edits: ed.length,
-        editedBy: ed.map((e) => e.anonId).join(" "), firstChangeMin: (() => { const f = (del || ed[0]); return f && sd.distributedAt ? r1((recMs(f) - sd.distributedAt) / 60000) : ""; })() });
-    });
-  });
-  return out;
+/* ===================== 匯出研究資料 =====================
+   每一欄的標題都是「中文（英文代號）」：中文方便閱讀，英文代號方便用 SPSS / R / Python 分析。
+   事件、版本、AI 紀錄每一列都有一欄「動作說明」，用一句話說明這一列發生了什麼事。
+   時間一律是台灣時間。系統內部用的欄位（資料庫編號等）只放在「完整原始資料（JSON）」。 */
+const XLSX_URL = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+const pad2 = (n) => String(n).padStart(2, "0");
+const twTime = (ms) => {
+  if (!ms) return "";
+  const d = new Date(ms + 8 * 3600000);
+  return d.getUTCFullYear() + "/" + pad2(d.getUTCMonth() + 1) + "/" + pad2(d.getUTCDate()) + " " + pad2(d.getUTCHours()) + ":" + pad2(d.getUTCMinutes()) + ":" + pad2(d.getUTCSeconds());
+};
+const ROLE_ZH = { PM: "PM", Translator: "譯者", Reviewer: "審校" };
+const roleZh = (r) => String(r || "").split("/").map((x) => ROLE_ZH[x.trim()] || x.trim()).filter(Boolean).join("／");
+const kindZh = (k) => (STEP_KINDS[k] ? STEP_KINDS[k].label : (k || ""));
+const yn = (v) => (v ? "是" : "否");
+const minsBetween = (a, b) => (a && b && b >= a ? Math.round((b - a) / 6000) / 10 : "");
+const whoZh = (a, role) => (a ? a + (role ? "（" + roleZh(role) + "）" : "") : "");
+const planText = (plan) => (plan || []).map((p) => kindZh(p.kind) + " " + (p.anonId || "?")).join(" → ");
+const LANG_ZH = (l) => (LANGS[l] ? LANGS[l].short : (l || ""));
+
+function evSentence(e) {
+  const a = whoZh(e.anonId, e.role), t = e.taskCode || "", to = e.toAnon || "";
+  const d = e.detail || "";
+  switch (e.type) {
+    case "dispatch": return a + "派發 " + t + (to ? "，第一步交給 " + to : "");
+    case "submit": return a + "完成 " + t + " 的「" + kindZh(e.kind) + "」" + (e.vLabel ? "（" + e.vLabel + "）" : "") + (to ? "，交給 " + to : "");
+    case "return": return a + "把 " + t + " 退回給 " + to + " 重新翻譯" + (d ? "，意見：" + d : "");
+    case "pm_confirm": return a + "繳交 " + t + " 的最終譯文" + (e.vLabel ? "（" + e.vLabel + "）" : "");
+    case "plan_edit": return a + "調整 " + t + " 的流程";
+    case "roles_set": return a + "指定組員角色";
+    case "ai_prompt": return a + "在 " + t + (d === "translate" ? " 請 AI 翻譯整份原文" : " 向 AI 提問");
+    case "ai_insert": return a + "把 AI 的回應插入 " + t + " 的譯文";
+    case "glossary_insert": return a + "在 " + t + " 插入術語";
+    case "glossary_add": return a + "新增術語：" + d;
+    case "glossary_edit": return a + "修改術語：" + d;
+    case "glossary_delete": return a + "刪除術語：" + d;
+    case "reflection": return a + "繳交課後反思";
+    default: return a + "" + evLabel(e) + (t ? "（" + t + "）" : "");
+  }
 }
 
-function dataRows(set) {
-  const T = S.T, d = T.data;
-  if (!d) return [];
-  const sname = sessionName(T.viewSid);
-  const ts = (r) => { const m = recMs(r); return m ? new Date(m).toISOString() : ""; };
-  const base = (r) => Object.assign({}, flatten(r), { session: sname, timestamp: ts(r) });
-  if (set === "events") return d.events.map(base);
-  if (set === "versions") return d.versions.map(base);
-  if (set === "aiLogs") return d.ai.map(base);
-  if (set === "reflections") return d.refl.map((r) => Object.assign(base(r), { answers: JSON.stringify(r.answers || []) }));
-  if (set === "groupGlossary") return (d.gloss || []).map(base);
-  if (set === "tasks") return d.tasks.map((t) => { const x = base(t); delete x.sourceText; delete x.finalText; x.plan = (t.plan || []).map((p) => p.kind + ":" + p.anonId).join(" > "); x.initialPlan = (t.initialPlan || []).map((p) => p.kind + ":" + p.anonId).join(" > "); return Object.assign(x, { sourceChars: (t.sourceText || "").length, finalChars: (t.finalText || "").length }); });
-  if (set === "flow") {
-    const out = [];
-    d.tasks.forEach((t) => analyzeFlow(t, d.events).forEach((s) => out.push({ session: sname, groupId: t.groupId, taskCode: t.code, step: s.step, flag: s.flag, detail: s.detail })));
-    return out;
-  }
-  if (set === "kpiPerson") return computeKpi(d).personRows;
-  if (set === "kpiTask") return computeKpi(d).taskRows;
-  if (set === "kpiGroup") return computeKpi(d).groupRows;
-  if (set === "seedTerms") return seedStatus(d);
-  return [];
-}
+/* 每個資料集：key＝檔名、sheet＝Excel 分頁名、title＝說明、rows＝取資料、cols＝欄位 [英文代號, 中文名稱, 取值, 欄位說明] */
 const EXPORT_SETS = [
-  ["events", "事件紀錄（交接、提交、AI 使用）"], ["versions", "各次提交的版本內容"], ["aiLogs", "AI prompt 與回應"],
-  ["reflections", "課後反思"], ["groupGlossary", "各組術語表（最終留存的詞條）"], ["tasks", "任務摘要（含預定與實際流程）"], ["flow", "流程比對結果"],
-  ["kpiPerson", "KPI：個人"], ["kpiTask", "KPI：每一段任務"], ["kpiGroup", "KPI：各組"], ["seedTerms", "老師預放術語：各組處理結果"]
+  { key: "events", sheet: "事件紀錄", title: "事件紀錄：每一個動作一列（交接、退回、AI、術語…）", rows: (d) => d.events, cols: () => [
+    ["time", "時間", (e) => twTime(recMs(e)), "動作發生的台灣時間"],
+    ["group", "組別", (e) => e.groupId, ""],
+    ["lang", "目標語言", (e) => LANG_ZH(e.lang), "這一組翻譯成哪一種語言"],
+    ["task", "段落", (e) => e.taskCode || "", "任務代號，例如 T01-2；和段落無關的動作（例如新增術語）是空白"],
+    ["actor", "誰", (e) => e.anonId, "做這個動作的人（匿名編號）"],
+    ["role", "角色", (e) => roleZh(e.role), "做動作時的角色"],
+    ["action", "動作", (e) => evLabel(e), "動作名稱"],
+    ["action_code", "動作代號", (e) => e.type + (e.kind ? "_" + e.kind : ""), "給統計軟體用的代號，例如 submit_translate＝完成翻譯、return_review＝審校退回"],
+    ["to", "交給", (e) => e.toAnon || "", "交接或退回的對象（匿名編號）"],
+    ["version", "版本", (e) => e.vLabel || "", "這個動作產生的譯文版本，例如 v3"],
+    ["step_no", "第幾步", (e) => (e.stepIdx === undefined || e.stepIdx === null || e.stepIdx === "" ? "" : Number(e.stepIdx) + 1), "這是該段落流程的第幾步"],
+    ["summary", "動作說明", evSentence, "用一句話說明這一列發生了什麼事"],
+    ["note", "意見／內容", (e) => (e.type === "ai_prompt" ? "" : e.detail || ""), "退回意見、交接時寫的話、術語內容等"]
+  ] },
+  { key: "versions", sheet: "譯文版本", title: "譯文版本：每次按下完成或退回時保存的譯文", rows: (d) => d.versions, cols: () => [
+    ["time", "提交時間", (v) => twTime(recMs(v)), ""],
+    ["group", "組別", (v) => v.groupId, ""],
+    ["lang", "目標語言", (v) => LANG_ZH(v.lang), ""],
+    ["task", "段落", (v) => v.taskCode, ""],
+    ["version", "版本", (v) => v.vLabel, "v1、v2…依提交順序編號"],
+    ["actor", "誰", (v) => v.anonId, ""],
+    ["role", "角色", (v) => roleZh(v.role), ""],
+    ["step", "步驟", (v) => kindZh(v.kind), "翻譯、審校、PM 檢查或最終檢查"],
+    ["step_no", "第幾步", (v) => (v.stepIdx === undefined ? "" : Number(v.stepIdx) + 1), ""],
+    ["round", "第幾輪", (v) => v.round || "", "退回一次就加一輪"],
+    ["returned", "是否退回", (v) => yn(v.returned), "這一版提交時是否同時退回給別人"],
+    ["summary", "動作說明", (v) => whoZh(v.anonId, v.role) + "提交 " + v.taskCode + " 的 " + v.vLabel + "（" + kindZh(v.kind) + (v.returned ? "，並退回" : "") + "）", ""],
+    ["chars", "字數", (v) => v.chars || (v.content || "").length, "這一版譯文的字元數"],
+    ["pickup_min", "輪到後多久打開（分）", (v) => minsBetween(v.startedAt, v.openedAt), "從輪到這個人，到他第一次打開這一步的時間"],
+    ["work_min", "打開到提交（分）", (v) => minsBetween(v.openedAt, v.clientTime || recMs(v)), "包含中間離開的時間，請當估計值"],
+    ["ai_overlap", "與 AI 回應重合度（%）", (v) => ((v.aiMatch || []).length ? Math.round(Math.max(...v.aiMatch.map((m) => m.contained || 0)) * 100) : ""), "AI 回應的內容有多少比例出現在這一版；僅供參考"],
+    ["comment", "意見", (v) => v.comment || "", "提交或退回時寫的意見"],
+    ["content", "譯文內容", (v) => v.content || "", ""]
+  ] },
+  { key: "ai", sheet: "AI對話", title: "AI 對話：每一次向 AI 提問一列", rows: (d) => d.ai, cols: () => [
+    ["time", "時間", (l) => twTime(recMs(l)), ""],
+    ["group", "組別", (l) => l.groupId, ""],
+    ["lang", "目標語言", (l) => LANG_ZH(l.lang), ""],
+    ["task", "段落", (l) => l.taskCode, ""],
+    ["actor", "誰", (l) => l.anonId, ""],
+    ["role", "角色", (l) => roleZh(l.role), ""],
+    ["model", "模型", (l) => l.model || "", "這次使用的 AI 模型"],
+    ["mode", "類型", (l) => (l.mode === "translate" ? "翻譯整份原文" : "自由提問"), ""],
+    ["summary", "動作說明", (l) => whoZh(l.anonId, l.role) + "用 " + (l.model || "AI") + (l.mode === "translate" ? " 翻譯 " + l.taskCode + " 的整份原文" : " 提問"), ""],
+    ["prompt", "提問內容", (l) => (l.mode === "translate" ? "（翻譯整份原文）" : l.prompt || ""), ""],
+    ["response", "AI 回應", (l) => l.response || "", "學生看到的回應"],
+    ["glossary_used", "自動帶入的術語", (l) => (l.glossaryHits || []).join("；"), "提問時網站自動提供給 AI 的本組術語"],
+    ["seconds", "回應秒數", (l) => l.seconds === undefined ? "" : l.seconds, ""],
+    ["tokens", "產生字詞數", (l) => l.completionTokens === undefined ? "" : l.completionTokens, "AI 產生的 token 數"],
+    ["converted", "簡轉繁", (l) => yn(l.convertedToTraditional), "AI 回答簡體字時，網站是否自動轉成繁體"],
+    ["original", "AI 原始回應", (l) => (l.modelOriginal && l.modelOriginal !== l.response ? l.modelOriginal : ""), "和「AI 回應」不同時才會有內容"]
+  ] },
+  { key: "reflections", sheet: "課後反思", title: "課後反思：每人一列", rows: (d) => d.refl, cols: (d) => {
+    const n = Math.max(0, ...d.refl.map((r) => (r.answers || []).length));
+    const qs = [];
+    d.refl.forEach((r) => (r.answers || []).forEach((x, i) => { if (!qs[i] && x.q) qs[i] = x.q; }));
+    const base = [
+      ["time", "送出時間", (r) => twTime(recMs(r)), ""],
+      ["group", "組別", (r) => r.groupId, ""],
+      ["actor", "誰", (r) => r.anonId, ""],
+      ["role", "角色", (r) => roleZh(r.role), ""]
+    ];
+    for (let i = 0; i < n; i++) base.push(["q" + (i + 1), "第" + (i + 1) + "題", (r) => ((r.answers || [])[i] || {}).a || "", qs[i] || ""]);
+    for (let i = 0; i < n; i++) base.push(["q" + (i + 1) + "_chars", "第" + (i + 1) + "題字數", (r) => rfLen(((r.answers || [])[i] || {}).a || ""), "不含空白與換行"]);
+    return base;
+  } },
+  { key: "glossary", sheet: "各組術語", title: "各組術語表：匯出當下每一組留下來的詞條", rows: (d) => d.gloss, cols: () => {
+    const seed = {};
+    (S.T.seeds || []).forEach((x) => { seed[x.id] = x; });
+    return [
+      ["group", "組別", (g) => g.groupId, ""],
+      ["lang", "目標語言", (g) => LANG_ZH(g.lang), ""],
+      ["source", "中文", (g) => g.src, ""],
+      ["target", "目前譯法", (g) => g.tgt, ""],
+      ["origin", "來源", (g) => (g.seedId ? "老師預放" : "學生新增"), ""],
+      ["teacher_target", "老師原本給的譯法", (g) => g.origTgt || "", "只有老師預放的詞條才有"],
+      ["trap", "老師故意放錯", (g) => (g.seedId ? yn(seed[g.seedId] && seed[g.seedId].trap) : ""), ""],
+      ["changed", "是否被改過", (g) => (g.seedId ? yn(g.origTgt && g.origTgt !== g.tgt) : ""), "老師預放的詞條，學生有沒有改過譯法"],
+      ["added_by", "新增者", (g) => (g.seedId ? "老師" : g.anonId || ""), ""],
+      ["edited_by", "最後修改者", (g) => g.editedBy || "", ""],
+      ["edits", "修改次數", (g) => g.editCount || 0, ""]
+    ];
+  } },
+  { key: "tasks", sheet: "段落摘要", title: "段落摘要：每一段任務一列（預定流程 vs 實際流程）", rows: (d) => d.tasks, cols: () => [
+    ["group", "組別", (t) => t.groupId, ""],
+    ["lang", "目標語言", (t) => LANG_ZH(t.lang), ""],
+    ["task", "段落", (t) => t.code, ""],
+    ["title", "題目", (t) => t.title || "", ""],
+    ["status", "狀態", (t) => STATUS_LABEL[t.status] || t.status, ""],
+    ["dispatched", "派發時間", (t) => twTime(t.clientTime || recMs(t)), ""],
+    ["finished", "完成時間", (t) => (t.status === "done" ? twTime(tms(t.confirmedAt)) : ""), "PM 繳交最終譯文的時間"],
+    ["total_min", "全程（分）", (t) => (t.status === "done" ? minsBetween(t.clientTime || recMs(t), tms(t.confirmedAt)) : ""), "派發到 PM 繳交"],
+    ["planned_flow", "預定流程", (t) => planText(t.initialPlan), "PM 派發時排的流程"],
+    ["actual_flow", "實際流程", (t) => planText((t.plan || []).filter((p) => p.done)), "實際完成的步驟（含退回後多出來的步驟）"],
+    ["returns", "退回次數", (t) => t.reworkCount || 0, ""],
+    ["versions", "版本數", (t) => t.vCount || 0, ""],
+    ["source_chars", "原文字數", (t) => (t.sourceText || "").length, ""],
+    ["final_chars", "最終譯文字數", (t) => (t.finalText || "").length, ""],
+    ["source_text", "原文", (t) => t.sourceText || "", ""],
+    ["final_text", "最終譯文", (t) => t.finalText || "", ""]
+  ] }
 ];
-function exportFields(rows) {
-  const pref = ["session", "groupId", "lang", "indTaskId", "taskCode", "role", "anonId", "kind", "stepIdx", "toAnon", "timestamp", "type", "vLabel", "kind", "toRole", "mode", "model", "prompt", "response", "src", "tgt", "modelOriginal", "convertedToTraditional", "content", "detail"];
-  const all = new Set();
-  rows.forEach((r) => Object.keys(r).forEach((k) => all.add(k)));
-  const rest = [...all].filter((k) => !pref.includes(k)).sort();
-  return pref.filter((k) => all.has(k)).concat(rest);
+const setOf = (key) => EXPORT_SETS.find((x) => x.key === key) || EXPORT_SETS[0];
+const headOf = (c) => c[1] + "（" + c[0] + "）";
+/* 依照勾選的欄位，產生「標題列 + 資料列」 */
+function exportTable(key) {
+  const T = S.T, d = T.data, set = setOf(key);
+  if (!d) return { set, cols: [], rows: [] };
+  const cols = set.cols(d).filter((c) => !T.exp.off[key + ":" + c[0]]);
+  const rows = set.rows(d).map((r) => cols.map((c) => { try { const v = c[2](r); return v === undefined || v === null ? "" : v; } catch (e) { return ""; } }));
+  return { set, cols, rows };
 }
-function doExport() {
-  const T = S.T;
-  const rows = dataRows(T.exp.set);
-  if (!rows.length) throw new Error("這個資料集目前沒有資料。請先按「重新載入資料」。");
-  const fields = exportFields(rows).filter((f) => !T.exp.off[T.exp.set + ":" + f]);
-  if (!fields.length) throw new Error("至少要選一個欄位");
-  const pick = (r) => { const o = {}; fields.forEach((f) => { o[f] = r[f]; }); return o; };
-  const stamp = new Date().toISOString().slice(0, 10);
-  const name = T.exp.set + "-" + sessionName(T.viewSid) + "-" + stamp;
-  if (T.exp.fmt === "csv") download(name + ".csv", toCsv(rows.map(pick), fields), "text/csv");
-  else download(name + ".json", JSON.stringify(rows.map(pick), null, 2), "application/json");
+// 檔名不能有 / \ : * ? " < > |（例如場次名稱「11/2 模擬」），否則瀏覽器會把檔名改成 download
+const safeName = (x) => String(x || "").replace(/[\\/:*?"<>|]+/g, "-").trim();
+const fileStamp = () => safeName(sessionName(S.T.viewSid)) + "-" + new Date().toISOString().slice(0, 10);
+function csvOf(headers, rows) {
+  const esc = (v) => { v = String(v); return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+  return "﻿" + [headers].concat(rows).map((r) => r.map(esc).join(",")).join("\r\n");
+}
+function exportCsv(key) {
+  const x = exportTable(key);
+  if (!x.rows.length) throw new Error("這份資料目前是空的。請先按「重新載入資料」。");
+  if (!x.cols.length) throw new Error("至少要勾選一個欄位");
+  download(x.set.sheet + "-" + fileStamp() + ".csv", csvOf(x.cols.map(headOf), x.rows), "text/csv");
+}
+let xlsxLoading = null;
+function loadXlsx() {
+  if (window.XLSX) return Promise.resolve();
+  if (!xlsxLoading) xlsxLoading = new Promise((ok, bad) => {
+    const sc = document.createElement("script");
+    sc.src = XLSX_URL;
+    sc.onload = () => ok();
+    sc.onerror = () => { xlsxLoading = null; bad(new Error("無法載入 Excel 元件（cdnjs.cloudflare.com），請確認網路後再試，或改用 CSV。")); };
+    document.head.appendChild(sc);
+  });
+  return xlsxLoading;
+}
+async function exportExcel() {
+  const T = S.T, d = T.data;
+  if (!d) throw new Error("請先載入資料");
+  await loadXlsx();
+  const X = window.XLSX, wb = X.utils.book_new();
+  const guide = [["翻譯實作儀表板　研究資料"], ["場次", sessionName(T.viewSid)], ["匯出時間", twTime(Date.now())],
+    ["說明", "只含匿名編號，沒有姓名與 Email。時間都是台灣時間。欄位標題是「中文（英文代號）」，英文代號可直接用在統計軟體。"], [],
+    ["分頁", "欄位", "說明"]];
+  const sheets = [];
+  EXPORT_SETS.forEach((set) => {
+    const x = exportTable(set.key);
+    guide.push([set.sheet, "", set.title + "（" + x.rows.length + " 列）"]);
+    x.cols.forEach((c) => guide.push(["", headOf(c), c[3] || ""]));
+    sheets.push(x);
+  });
+  const gws = X.utils.aoa_to_sheet(guide);
+  gws["!cols"] = [{ wch: 14 }, { wch: 30 }, { wch: 70 }];
+  X.utils.book_append_sheet(wb, gws, "欄位說明");
+  sheets.forEach((x) => {
+    const ws = X.utils.aoa_to_sheet([x.cols.map(headOf)].concat(x.rows));
+    ws["!cols"] = x.cols.map((c) => ({ wch: /content|text|response|prompt|original|^q\d+$|summary|note|comment|flow/.test(c[0]) ? 50 : Math.max(10, Math.min(24, headOf(c).length * 2)) }));
+    ws["!freeze"] = { xSplit: 0, ySplit: 1 };
+    X.utils.book_append_sheet(wb, ws, x.set.sheet);
+  });
+  X.writeFile(wb, "研究資料-" + fileStamp() + ".xlsx");
+}
+function exportRaw() {
+  const T = S.T, d = T.data;
+  if (!d) throw new Error("請先載入資料");
+  const all = (arr) => arr.map((r) => flatten(r));
+  const out = {
+    note: "完整原始資料（所有欄位，時間為 UTC）。只含匿名編號。",
+    session: sessionName(T.viewSid), sessionId: T.viewSid, exportedAt: new Date().toISOString(),
+    tasks: all(d.tasks), events: all(d.events), versions: all(d.versions), aiLogs: all(d.ai), reflections: all(d.refl), groupGlossary: all(d.gloss)
+  };
+  download("完整原始資料-" + fileStamp() + ".json", JSON.stringify(out, null, 2), "application/json");
 }
 function exportMapping() {
   const T = S.T;
   if (!confirm("對照表含有學生的 Email 與匿名編號，只能教師保管，不能放進研究資料。確定要下載嗎？")) return;
   const rows = T.roster.map((r) => ({ session: sessionName(T.viewSid), groupId: r.groupId, name: r.name || "", pm: r.pm ? "PM" : "", anonId: r.anonId, email: r.email }));
-  download("對照表-" + sessionName(T.viewSid) + ".csv", toCsv(rows, ["session", "groupId", "name", "pm", "anonId", "email"]), "text/csv");
+  download("對照表-" + safeName(sessionName(T.viewSid)) + ".csv", toCsv(rows, ["session", "groupId", "name", "pm", "anonId", "email"]), "text/csv");
 }
 
 /* ===================== 畫面 ===================== */
 function viewTeacher() {
   const T = S.T;
-  const tabs = [["roster", "場次與名單"], ["bank", "題庫"], ["seeds", "預設術語"], ["glossary", "各組術語表"], ["kpi", "KPI 彙整"], ["data", "研究資料"], ["export", "匯出"]];
-  const body = { roster: tRoster, bank: tBank, seeds: tSeeds, glossary: tGlossary, kpi: tKpi, data: tData, export: tExport }[T.tab]();
+  const tabs = [["roster", "場次與名單"], ["bank", "題庫"], ["seeds", "預設術語"], ["glossary", "各組術語表"], ["data", "研究資料"], ["export", "匯出"]];
+  const body = { roster: tRoster, bank: tBank, seeds: tSeeds, glossary: tGlossary, data: tData, export: tExport }[T.tab]();
   return h("div", { class: "wrap" },
     h("header", { class: "top" },
       h("div", { class: "l" }, h("h1", null, "教師後台"),
         h("div", { class: "chips" }, chip(S.email, true), chip("管理場次：" + (T.viewSid ? sessionName(T.viewSid) : "（尚未建立）")),
           T.viewSid && S.settings && S.settings.activeSessionId === T.viewSid ? h("span", { class: "badge ok" }, "學生目前進入的場次") : null)),
       h("div", { class: "btns" }, h("button", { class: "plain", onclick: () => act(refreshTeacher, "已更新") }, "重新整理"), h("button", { class: "plain", onclick: doLogout }, "登出"))),
-    h("div", { class: "tabs" }, tabs.map(([k, n]) => h("button", { class: "tab" + (T.tab === k ? " on" : ""), onclick: () => { T.tab = k; if ((k === "data" || k === "kpi") && !T.data && T.viewSid) act(loadResearch); else rr(); } }, n))),
+    h("div", { class: "tabs" }, tabs.map(([k, n]) => h("button", { class: "tab" + (T.tab === k ? " on" : ""), onclick: () => { T.tab = k; if ((k === "data" || k === "export") && !T.data && T.viewSid) act(loadResearch); else rr(); } }, n))),
     body);
 }
 
@@ -3221,32 +3325,6 @@ function tGlossary() {
       groups[gid].map((g) => h("div", { class: "row" }, h("div", { class: "l" }, h("span", null, g.src + (g.seedId ? "　（教師預放）" : "")), h("span", { class: "mono" }, g.tgt + (g.seedId && g.origTgt && g.origTgt !== g.tgt ? "　← 原本：" + g.origTgt : ""))))))));
 }
 
-function tKpi() {
-  const T = S.T, d = T.data;
-  if (!T.viewSid) return h("div", { class: "card" }, h("p", null, "請先建立場次。"));
-  const head = h("div", { class: "card" },
-    h("div", { class: "top" }, h("h2", null, "KPI 彙整"), h("div", { class: "btns" },
-      d ? h("span", { class: "hint" }, "載入於 " + fmtFull(d.at)) : null,
-      h("button", { disabled: T.loadingData, onclick: () => act(loadResearch) }, T.loadingData ? "載入中…" : (d ? "重新載入資料" : "載入資料")))),
-    h("p", { class: "sub" }, "全部由系統紀錄的時間與次數算出，只顯示匿名編號。時間是用「前一步完成的時間」與「這個人第一次打開這一步的時間」估算的，系統不記錄打字過程，所以「作業時間」包含中間離開或休息的時間，請當作估計值。"),
-    h("p", { class: "hint" }, "目前不含：準時率（系統沒有預定完成時間）、審校意見的逐條分類、誤改率、術語一致率、組員溝通紀錄。"));
-  if (!d) return head;
-  const k = computeKpi(d);
-  const table = (title, note, cols, rows, setName) => h("div", { class: "card" },
-    h("div", { class: "top" }, h("h2", null, title), h("button", { class: "ghost sm", disabled: !rows.length, onclick: () => { T.exp.set = setName; try { doExport(); } catch (e) { toast(e.message, "bad"); } } }, "下載 CSV")),
-    note ? h("p", { class: "hint" }, note) : null,
-    rows.length === 0 ? h("p", { class: "sub" }, "目前沒有資料。") :
-      h("div", { class: "tablewrap" }, h("table", null,
-        h("thead", null, h("tr", null, cols.map(([key, lab]) => h("th", null, lab)))),
-        h("tbody", null, rows.map((r) => h("tr", null, cols.map(([key]) => h("td", { class: "m" }, r[key] === undefined ? "" : String(r[key])))))))));
-  const ss = seedStatus(d);
-  return h("div", { style: "display:flex;flex-direction:column;gap:20px" }, head,
-    table("各組", "返工率 ＝ 送回次數 ÷ 已完成步驟數（％）。", [["groupId", "組別"], ["tasks", "任務數"], ["tasksDone", "已完成"], ["versions", "版本數"], ["returns", "送回次數"], ["reworkRate", "返工率 %"], ["planEdits", "調整流程次數"], ["avgTotalMin", "平均全程（分）"], ["glossaryTerms", "術語表筆數"], ["glossaryAddedByStudents", "學生新增術語次數"]], k.groupRows, "kpiGroup"),
-    table("個人", "處理字數 ＝ 該人所有提交版本的字數總和；每小時字數 ＝ 處理字數 ÷ 作業時間；接手時間 ＝ 輪到他到第一次打開的平均時間。", [["groupId", "組別"], ["anonId", "匿名編號"], ["translateSteps", "翻譯"], ["reviewSteps", "審校"], ["finalSteps", "PM 檢查"], ["charsHandled", "處理字數"], ["workMin", "作業時間（分）"], ["turnaroundMin", "輪到到完成（分）"], ["charsPerHour", "每小時字數"], ["avgPickupMin", "平均接手（分）"], ["returnsIssued", "送回次數"], ["glossaryAdded", "新增術語"], ["glossaryEdited", "修改術語"], ["glossaryDeleted", "刪除術語"], ["aiPrompts", "AI 提問"], ["aiInserts", "插入 AI"], ["glossaryInserts", "插入術語"]], k.personRows, "kpiPerson"),
-    table("每一段任務", "全程 ＝ 派發到 PM 繳交。", [["groupId", "組別"], ["taskCode", "任務"], ["status", "狀態"], ["sourceChars", "原文字數"], ["finalChars", "譯文字數"], ["stepsPlanned", "預定步驟"], ["stepsDone", "已完成步驟"], ["versions", "版本數"], ["returns", "送回次數"], ["reworkRate", "返工率 %"], ["planEdits", "調整流程"], ["totalMin", "全程（分）"]], k.taskRows, "kpiTask"),
-    table("老師預放術語：各組處理結果", "「故意放錯」那幾筆最值得看：已修改／已刪除代表該組發現了問題，未更動代表沒有處理。", [["groupId", "組別"], ["src", "中文"], ["seededTgt", "預放譯法"], ["trap", "故意放錯"], ["status", "處理結果"], ["currentTgt", "目前譯法"], ["edits", "修改次數"], ["editedBy", "誰改的"], ["firstChangeMin", "發放後多久處理（分）"]], ss, "seedTerms"));
-}
-
 function tData() {
   const T = S.T, d = T.data;
   if (!T.viewSid) return h("div", { class: "card" }, h("p", null, "請先建立場次。"));
@@ -3317,19 +3395,37 @@ function tData() {
 function tExport() {
   const T = S.T;
   if (!T.viewSid) return h("div", { class: "card" }, h("p", null, "請先建立場次。"));
-  const rows = dataRows(T.exp.set);
-  const fields = exportFields(rows);
-  return h("div", { class: "card" },
-    h("h2", null, "匯出研究資料"),
-    h("p", { class: "sub" }, "匯出的資料只有匿名編號，不含姓名與 Email。姓名對照請另外在「場次與名單」下載。"),
-    !T.data ? h("div", { class: "card warn" }, h("p", null, "還沒有載入資料。"), h("div", { class: "btns" }, h("button", { onclick: () => act(loadResearch) }, "載入資料"))) : null,
-    h("div", { class: "grid" },
-      h("div", { class: "fld" }, h("label", { for: "xs" }, "資料集"), h("select", { id: "xs", value: T.exp.set, onchange: (e) => { T.exp.set = e.target.value; rr(); } }, EXPORT_SETS.map(([k, n]) => h("option", { value: k }, n)))),
-      h("div", { class: "fld" }, h("label", { for: "xf" }, "格式"), h("select", { id: "xf", value: T.exp.fmt, onchange: (e) => { T.exp.fmt = e.target.value; rr(); } }, h("option", { value: "csv" }, "CSV（Excel 可直接開）"), h("option", { value: "json" }, "JSON")))),
-    h("h3", null, "欄位（" + rows.length + " 列）"),
-    rows.length === 0 ? h("p", { class: "sub" }, "這個資料集目前沒有資料。") :
-      h("div", { class: "fields" }, fields.map((f) => h("label", { class: "chk" }, h("input", { type: "checkbox", checked: !T.exp.off[T.exp.set + ":" + f], onchange: (e) => { T.exp.off[T.exp.set + ":" + f] = !e.target.checked; } }), f))),
-    h("div", { class: "btns" }, h("button", { disabled: !rows.length, onclick: () => { try { doExport(); } catch (e) { toast(e.message, "bad"); } } }, "下載")));
+  const d = T.data;
+  const head = h("div", { class: "card" },
+    h("div", { class: "top" }, h("h2", null, "匯出研究資料"), h("div", { class: "btns" },
+      d ? h("span", { class: "hint" }, "載入於 " + fmtFull(d.at)) : null,
+      h("button", { class: "plain", disabled: T.loadingData, onclick: () => act(loadResearch) }, T.loadingData ? "載入中…" : (d ? "重新載入資料" : "載入資料")))),
+    h("p", { class: "sub" }, "匯出的資料只有匿名編號，不含姓名與 Email（姓名對照請在「場次與名單」另外下載）。欄位標題是「中文（英文代號）」，時間都是台灣時間。"));
+  if (!d) return h("div", { style: "display:flex;flex-direction:column;gap:20px" }, head);
+  const all = h("div", { class: "card" },
+    h("h2", null, "一次下載全部"),
+    h("div", { class: "btns" },
+      h("button", { onclick: () => act(exportExcel) }, "下載全部（Excel，多分頁）"),
+      h("button", { class: "ghost", onclick: () => { try { exportRaw(); } catch (e) { toast(e.message, "bad"); } } }, "下載完整原始資料（JSON）")),
+    h("p", { class: "hint" }, "Excel 第一頁是「欄位說明」，後面每一份資料一個分頁：" + EXPORT_SETS.map((x) => x.sheet).join("、") + "。下面取消勾選的欄位，Excel 和 CSV 都不會匯出。"),
+    h("p", { class: "hint" }, "完整原始資料包含系統內部的所有欄位，給研究備份用，平常不需要。"));
+  const x = exportTable(T.exp.set);
+  const allCols = x.set.cols(d);
+  const one = h("div", { class: "card" },
+    h("h2", null, "下載單一份（CSV）"),
+    h("div", { class: "fld" }, h("label", { for: "xs" }, "資料"), h("select", { id: "xs", value: x.set.key, onchange: (e) => { T.exp.set = e.target.value; rr(); } },
+      EXPORT_SETS.map((st) => h("option", { value: st.key }, st.sheet + "　" + st.title.split("：")[1])))),
+    h("h3", null, "欄位（共 " + x.rows.length + " 列）"),
+    h("div", { class: "fields" }, allCols.map((c) => h("label", { class: "chk", title: c[3] || "" },
+      h("input", { type: "checkbox", checked: !T.exp.off[x.set.key + ":" + c[0]], onchange: (e) => { T.exp.off[x.set.key + ":" + c[0]] = !e.target.checked; rr(); } }), headOf(c)))),
+    x.rows.length ? h("div", null,
+      h("p", { class: "hint" }, "預覽前 5 列："),
+      h("div", { class: "tablewrap" }, h("table", null,
+        h("thead", null, h("tr", null, x.cols.map((c) => h("th", null, headOf(c))))),
+        h("tbody", null, x.rows.slice(0, 5).map((r) => h("tr", null, r.map((v) => h("td", { class: "cell" }, String(v).length > 80 ? String(v).slice(0, 80) + "…" : String(v))))))))) :
+      h("p", { class: "sub" }, "這份資料目前是空的。"),
+    h("div", { class: "btns" }, h("button", { disabled: !x.rows.length, onclick: () => { try { exportCsv(x.set.key); } catch (e) { toast(e.message, "bad"); } } }, "下載這份 CSV")));
+  return h("div", { style: "display:flex;flex-direction:column;gap:20px" }, head, all, one);
 }
 
 boot();
