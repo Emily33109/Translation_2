@@ -295,6 +295,10 @@ const MODEL_CHOICES = ONLY_Q4F32 ? [
   [MODEL_F16, "Qwen3 0.6B（q4f16，約需 1.4GB 顯示記憶體，預設）"],
   [MODEL_F32, "Qwen3 0.6B（q4f32，約需 1.9GB，沒有 shader-f16 時用）"]
 ];
+// 「在我的電腦上跑」：Colab 沒開放時，學生可以改用在自己瀏覽器裡執行的小模型（第一次要下載約 1GB）
+const LOCAL_NAME = "在我的電腦上跑（Qwen3 1.7B）";
+const LOCAL_F16 = "Qwen3-1.7B-q4f16_1-MLC";   // 約需 2.0GB 顯示記憶體
+const LOCAL_F32 = "Qwen3-1.7B-q4f32_1-MLC";   // 約需 2.6GB；顯示卡不支援 shader-f16 時自動改用
 const PLACEHOLDER = "[由教師填寫]";
 
 // 角色只有三種；人名用組員自己的名字。一個人可以同時有多個角色（例如 Translator + Reviewer）。
@@ -1497,6 +1501,7 @@ function viewNoRoster() {
 const AI = {
   webllm: null, engine: null, status: "idle", pct: 0, text: "", modelId: "", selected: MODEL_F32,
   busy: false, env: null, live: "", liveFor: null, stop: false, models: [],
+  src: "colab", colabOk: false, colabErr: "", colabBusy: false, localEnv: null, localId: "",
   conv: null, convTried: false, cached: false,
   test: { state: "idle", out: "", sec: 0, ok: false }, prepLang: "en"
 };
@@ -1569,19 +1574,81 @@ async function colabConnect() {
   const ids = ((j && j.data) || []).map((m) => String((m && m.id) || "").split("/").pop()).filter(Boolean);
   return ids.length ? ids : ["colab-model"];
 }
-/* 學生選的模型：記在這台電腦，下次打開還是同一個 */
+/* 學生選的模型：記在這台電腦，下次打開還是同一個（"local" 代表「在我的電腦上跑」） */
 const MODEL_PICK_KEY = "trans-colab-model";
-function pickModel(id) {
-  if (!AI.models.includes(id)) return;
-  AI.modelId = id;
-  AI.text = "已連線：" + id;
-  try { localStorage.setItem(MODEL_PICK_KEY, id); } catch (e) {}
+const savedPick = () => { try { return localStorage.getItem(MODEL_PICK_KEY) || ""; } catch (e) { return ""; } };
+const savePick = (v) => { try { localStorage.setItem(MODEL_PICK_KEY, v); } catch (e) {} };
+const usingLocal = () => !IS_COLAB || AI.src === "local";
+function useColab(name) {
+  AI.src = "colab"; AI.modelId = name;
+  AI.status = "ready"; AI.pct = 100; AI.text = "已連線：" + name;
+  savePick(name);
+}
+/* 選了「在我的電腦上跑」：已載入就直接用；之前下載過就自動載入；沒下載過先說明，等學生按下載 */
+async function selectLocal(start) {
+  AI.src = "local"; savePick("local");
+  if (AI.engine && AI.localId) { AI.modelId = LOCAL_NAME; AI.status = "ready"; AI.pct = 100; AI.text = "已載入：" + LOCAL_NAME; rr(); return; }
+  AI.status = "local-idle"; AI.text = ""; rr();
+  if (!AI.localEnv) { AI.localEnv = await aiEnvCheck(); rr(); }
+  const env = AI.localEnv;
+  if (!env.webgpu || !env.adapter) return;
+  if (!start) {
+    try { await ensureWebllm(); start = (await AI.webllm.hasModelInCache(LOCAL_F16)) || (await AI.webllm.hasModelInCache(LOCAL_F32)); } catch (e) { start = false; }
+  }
+  if (start && AI.src === "local" && AI.status === "local-idle") localLoad();
+}
+async function localLoad() {
+  if (AI.status === "loading") return;
+  const env = AI.localEnv || (AI.localEnv = await aiEnvCheck());
+  AI.src = "local"; AI.status = "loading"; AI.pct = 0; AI.text = "載入函式庫…"; rr();
+  const once = async (id) => {
+    if (AI.engine && AI.localId !== id) { try { await AI.engine.unload(); } catch (e) {} AI.engine = null; }
+    if (!AI.engine) {
+      AI.text = "下載並載入模型（第一次約 1GB，請不要關掉網頁）…"; rr();
+      AI.engine = await AI.webllm.CreateMLCEngine(id, {
+        initProgressCallback: (r) => { AI.pct = Math.round((r.progress || 0) * 100); AI.text = r.text || ""; aiProgressUpdate(); }
+      });
+    }
+    AI.localId = id;
+  };
+  try {
+    await ensureWebllm();
+    await ensureConverter();
+    const first = env.f16 ? LOCAL_F16 : LOCAL_F32;
+    try { await once(first); }
+    catch (e1) {
+      const m1 = String(e1 && e1.message ? e1.message : e1);
+      if (first === LOCAL_F16 && isShaderError(m1)) { AI.engine = null; AI.text = "這台電腦不支援 q4f16，自動改用 q4f32…"; rr(); await once(LOCAL_F32); }
+      else throw e1;
+    }
+    if (AI.src === "local") { AI.modelId = LOCAL_NAME; AI.status = "ready"; AI.pct = 100; AI.text = "已載入：" + LOCAL_NAME; }
+  } catch (e) {
+    AI.engine = null; AI.localId = ""; AI.status = "error";
+    const msg = String(e && e.message ? e.message : e);
+    AI.text = /device.*(lost|removed|hung)|DXGI|insufficient memory|out of memory/i.test(msg)
+      ? "這台電腦的顯示卡記憶體不夠，或顯示卡發生錯誤，沒辦法在這台電腦上跑。請改用 Colab 模型（開放時段），或換一台電腦。原始訊息：" + msg
+      : "在這台電腦上載入失敗：" + msg;
+  }
   rr();
 }
-function modelSelect(id) {
-  if (!IS_COLAB || AI.sim || AI.status !== "ready" || AI.models.length < 2) return null;
-  return h("select", { id, value: AI.modelId, disabled: AI.busy, title: "選擇要使用的 AI 模型", style: "width:auto;font-size:13px;padding:2px 8px", onchange: (e) => pickModel(e.target.value) },
-    AI.models.map((m) => h("option", { value: m }, m)));
+function pickModel(v) {
+  if (v === "local") { selectLocal(false); return; }
+  if (v === "recheck") { colabLoad(); return; }
+  if (AI.models.includes(v)) { useColab(v); rr(); }
+}
+/* withLocal：要不要包含「在我的電腦上跑」（準備頁只測 Colab，所以不包含） */
+function modelSelect(id, withLocal = true) {
+  if (!IS_COLAB || AI.sim || !AI.env) return null;
+  if (!withLocal) {
+    if (AI.status !== "ready" || AI.src !== "colab" || AI.models.length < 2) return null;
+    return h("select", { id, value: AI.modelId, disabled: AI.busy, title: "選擇要使用的 AI 模型", style: "width:auto;font-size:13px;padding:2px 8px", onchange: (e) => pickModel(e.target.value) },
+      AI.models.map((m) => h("option", { value: m }, m)));
+  }
+  const opts = AI.colabOk ? AI.models.map((m) => h("option", { value: m }, m))
+    : [h("option", { value: "", disabled: true }, AI.colabBusy ? "Colab 模型（檢查中…）" : "Colab 模型（目前未開放）"), h("option", { value: "recheck" }, "重新檢查 Colab 是否開放")];
+  opts.push(h("option", { value: "local" }, LOCAL_NAME));
+  const value = AI.src === "local" ? "local" : (AI.colabOk ? AI.modelId : "");
+  return h("select", { id, value, disabled: AI.busy || AI.status === "loading", title: "選擇要使用的 AI 模型", style: "width:auto;max-width:100%;font-size:13px;padding:2px 8px", onchange: (e) => pickModel(e.target.value) }, opts);
 }
 /* 把串流回應轉成和 WebLLM 一樣格式的片段 */
 async function* colabStream(req) {
@@ -1654,29 +1721,39 @@ async function aiLoadOnce(id) {
   AI.modelId = id; AI.selected = id; AI.status = "ready"; AI.pct = 100; AI.text = "已載入：" + id;
   rememberModel(id);
 }
+/* 連線到 Colab，再依照學生上次的選擇決定用 Colab 還是「在我的電腦上跑」 */
+async function colabLoad() {
+  if (AI.colabBusy) return;
+  AI.colabBusy = true;
+  const pick = savedPick();
+  const showProgress = !(pick === "local" || AI.src === "local");
+  if (showProgress) { AI.status = "loading"; AI.pct = 30; AI.text = "連線到 Colab 伺服器…"; }
+  rr();
+  await new Promise((r) => setTimeout(r, 600)); // 讓「連線中」至少顯示一下
+  try {
+    AI.models = await colabConnect();
+    AI.colabOk = true; AI.colabErr = "";
+  } catch (e) {
+    AI.colabOk = false; AI.models = [];
+    AI.colabErr = String(e && e.message ? e.message : e) + "（" + new Date().toLocaleTimeString() + " 嘗試）";
+  }
+  AI.colabBusy = false;
+  if (!AI.colabOk && DEMO_MODE) {
+    AI.sim = true; AI.src = "colab"; AI.modelId = "示範模擬 AI";
+    AI.status = "ready"; AI.pct = 100; AI.text = "沒有連到 Colab，改用模擬回應（只有示範版會這樣）。原因：" + AI.colabErr;
+  } else if (pick === "local" || AI.src === "local") {
+    if (AI.status !== "loading" && !(AI.status === "ready" && AI.src === "local")) selectLocal(false);
+  } else if (AI.colabOk) {
+    AI.sim = false;
+    useColab(AI.models.includes(pick) ? pick : AI.models[0]);
+  } else {
+    AI.src = "colab"; AI.status = "error"; AI.pct = 0; AI.text = AI.colabErr;
+  }
+  rr();
+}
 async function aiLoad(id) {
   if (AI.status === "loading") return;
-  if (IS_COLAB) {
-    AI.status = "loading"; AI.pct = 30; AI.text = "連線到 Colab 伺服器…"; rr();
-    await new Promise((r) => setTimeout(r, 600)); // 讓「連線中」至少顯示一下
-    try {
-      AI.models = await colabConnect();
-      let saved = "";
-      try { saved = localStorage.getItem(MODEL_PICK_KEY) || ""; } catch (e) {}
-      AI.modelId = AI.models.includes(saved) ? saved : AI.models[0];
-      AI.sim = false;
-      AI.status = "ready"; AI.pct = 100; AI.text = "已連線：" + AI.modelId;
-    } catch (e) {
-      if (DEMO_MODE) {
-        AI.sim = true; AI.modelId = "示範模擬 AI";
-        AI.status = "ready"; AI.pct = 100; AI.text = "沒有連到 Colab，改用模擬回應（只有示範版會這樣）。原因：" + String(e && e.message ? e.message : e);
-      } else {
-        AI.status = "error"; AI.pct = 0; AI.text = String(e && e.message ? e.message : e) + "（" + new Date().toLocaleTimeString() + " 嘗試）";
-      }
-    }
-    rr();
-    return;
-  }
+  if (IS_COLAB) { await colabLoad(); return; }
   AI.status = "loading"; AI.pct = 0; AI.text = "載入函式庫…"; rr();
   try {
     await ensureWebllm();
@@ -1705,7 +1782,8 @@ async function aiLoad(id) {
 async function aiGenerate(userPrompt, mode, lang, hits) {
   lang = LANGS[lang] ? lang : "en";
   hits = hits || [];
-  if (AI.status !== "ready" || (!AI.engine && !IS_COLAB)) throw new Error("AI 尚未載入");
+  const local = usingLocal() && !AI.sim;
+  if (AI.status !== "ready" || (local && !AI.engine)) throw new Error("AI 尚未載入");
   if (mode === "free") await ensureConverter();
   let sysText = mode === "translate" ? LANGS[lang].sys : sysFree(lang);
   if (hits.length) sysText += mode === "translate"
@@ -1720,12 +1798,12 @@ async function aiGenerate(userPrompt, mode, lang, hits) {
   const conv = (t) => (mode === "free" && !hasKana(t)) ? toTW(t) : t;
   messages.push({ role: "user", content: userPrompt });
   const req = { messages, temperature: 0.2, max_tokens: 768, stream: true, stream_options: { include_usage: true } };
-  if (AI.modelId.startsWith("Qwen3")) req.extra_body = { enable_thinking: false };
+  if (local || AI.modelId.startsWith("Qwen3")) req.extra_body = { enable_thinking: false };
   const t0 = performance.now();
   let raw = "", usage = null, finish = "", n = 0;
-  const chunks = AI.sim ? demoStream(req) : IS_COLAB ? colabStream(req) : await AI.engine.chat.completions.create(req);
+  const chunks = AI.sim ? demoStream(req) : !local ? colabStream(req) : await AI.engine.chat.completions.create(req);
   for await (const c of chunks) {
-    if (AI.stop) { if (!IS_COLAB) { try { AI.engine.interruptGenerate(); } catch (e) {} } break; }
+    if (AI.stop) { if (local) { try { AI.engine.interruptGenerate(); } catch (e) {} } break; }
     n++;
     const ch = c.choices && c.choices[0];
     if (ch && ch.finish_reason) finish = ch.finish_reason;
@@ -1834,8 +1912,8 @@ function viewPrepColab() {
       AI.status === "ready" ? h("span", { class: "badge " + (AI.sim ? "warn" : "ok"), style: "align-self:flex-start" }, AI.sim ? "示範模擬 AI（未連到 Colab）" : "已連線，可用模型：" + AI.models.join("、")) : null),
     h("div", { class: "card" },
       h("h2", null, "步驟 3　測試翻譯"),
-      modelSelect("prep-model") ? h("label", { for: "prep-model" }, "要測試的模型") : null,
-      modelSelect("prep-model"),
+      modelSelect("prep-model", false) ? h("label", { for: "prep-model" }, "要測試的模型") : null,
+      modelSelect("prep-model", false),
       h("label", { for: "prep-lang" }, "要測試的目標語言（原文是中文）"),
       h("select", { id: "prep-lang", value: AI.prepLang, onchange: (e) => { AI.prepLang = e.target.value; AI.test = { state: "idle", out: "", sec: 0, ok: false }; rr(); } },
         LANG_KEYS.map((k) => h("option", { value: k }, LANGS[k].short))),
@@ -2383,16 +2461,38 @@ function aiPanel(t) {
   const env = AI.env;
   const mode = editMode(t);
   const status = AI.status === "ready"
-    ? h("span", { class: "badge " + (AI.sim ? "warn" : "ok") }, AI.sim ? "示範模擬 AI" : "已連線")
+    ? h("span", { class: "badge " + (AI.sim ? "warn" : "ok") }, AI.sim ? "示範模擬 AI" : (IS_COLAB && AI.src === "local" ? "在這台電腦執行" : "已連線"))
+    : AI.status === "local-idle" ? h("span", { class: "badge" }, "尚未下載")
     : h("span", { class: "badge" + (AI.status === "error" ? " bad" : "") }, AI.status === "loading" ? "連線中…" : AI.status === "error" ? "連線失敗" : "未連線");
   const pick = modelSelect("ai-model");
   const head = h("div", { class: "aihead" }, pick ? h("label", { class: "mono", for: "ai-model", style: "display:flex;align-items:center;gap:6px" }, "模型：", pick) : h("span", { class: "mono" }, AI.modelId ? "模型：" + AI.modelId : (IS_COLAB ? "Colab 雲端 AI" : "離線 AI")), status);
   const wrap = (...kids) => h("div", { class: "sidebody" }, head, ...kids);
   if (!env) return wrap(h("p", { class: "sub" }, "正在檢查…"));
   if (!env.webgpu || !env.adapter) return wrap(h("div", { class: "card bad" }, h("p", null, "這台電腦的瀏覽器不支援 WebGPU，無法使用 AI。你仍然可以自己翻譯並使用術語表。")));
+  if (IS_COLAB && AI.status === "local-idle") {
+    const le = AI.localEnv;
+    return wrap(h("div", { class: "card" },
+      h("h3", null, LOCAL_NAME),
+      h("p", { class: "sub" }, "這個模型會下載到你的瀏覽器，用你電腦的顯示卡執行，不需要 Colab，隨時都能用。"),
+      h("ul", { class: "sub" },
+        h("li", null, "第一次要下載約 1GB，之後會存在瀏覽器裡，不用重新下載。"),
+        h("li", null, "請用 Chrome 或 Edge；手機和太舊的電腦可能跑不動。"),
+        h("li", null, "這是小模型，翻譯品質比 Colab 模型差，比較適合查術語、問簡單的問題。")),
+      !le ? h("p", { class: "sub" }, "正在檢查這台電腦…")
+        : (!le.webgpu || !le.adapter) ? h("div", { class: "card bad" }, h("p", null, "這台電腦的瀏覽器不支援 WebGPU，沒辦法在這台電腦上跑。請改用 Colab 模型（開放時段），或換用 Chrome／Edge。"))
+        : h("div", { class: "btns" }, h("button", { onclick: () => localLoad() }, "下載並啟動（約 1GB）"),
+            AI.colabOk ? h("button", { class: "plain", onclick: () => pickModel(AI.models[0]) }, "改用 Colab 模型") : null)));
+  }
   if (AI.status === "idle" || AI.status === "error") {
+    const colabBtns = IS_COLAB && AI.src === "colab"
+      ? [h("button", { onclick: () => colabLoad() }, AI.status === "error" ? "重新連線" : "連線到 Colab"),
+         h("button", { class: "ghost", onclick: () => selectLocal(false) }, "改用「在我的電腦上跑」")]
+      : IS_COLAB && AI.src === "local"
+        ? [h("button", { onclick: () => localLoad() }, "再試一次"), AI.colabOk ? h("button", { class: "plain", onclick: () => pickModel(AI.models[0]) }, "改用 Colab 模型") : null]
+        : [h("button", { onclick: () => aiLoad(AI.selected) }, "載入 AI 模型")];
     return wrap(h("p", { class: "sub" }, AI.status === "error" ? AI.text : (IS_COLAB ? "尚未連線到 Colab 伺服器。" : "請先用「AI 準備頁」載入模型。")),
-      h("div", { class: "btns" }, h("button", { onclick: () => aiLoad(AI.selected) }, IS_COLAB ? (AI.status === "error" ? "重新連線" : "連線到 Colab") : "載入 AI 模型")));
+      IS_COLAB && AI.src === "colab" && AI.status === "error" ? h("p", { class: "hint" }, "Colab 只在開放時段才會開著。現在不是開放時段的話，可以改用「在我的電腦上跑」。") : null,
+      h("div", { class: "btns" }, colabBtns));
   }
   if (AI.status === "loading") {
     return wrap(h("div", { class: "bar" }, h("div", { id: "ai-bar", style: "width:" + AI.pct + "%" })), h("div", { class: "mono", id: "ai-status" }, AI.text));
@@ -2413,7 +2513,7 @@ function aiPanel(t) {
           h("span", { class: "meta" }, fmtShort(recMs(l)).slice(6))),
         h("div", { class: "msg a" },
           h("div", { class: "bub" }, l.response),
-          l.model && AI.models.length > 1 ? h("span", { class: "meta" }, l.model) : null,
+          l.model && IS_COLAB ? h("span", { class: "meta" }, l.model) : null,
           h("div", { class: "acts" },
             h("button", { class: "ghost sm", disabled: !mode, title: mode ? "" : "輪到你編輯時才能插入", onclick: () => insertText(l.response, "ai_insert", { detail: l.id, aiLogId: l.id }) }, "插入譯文"),
             h("button", { class: "plain sm", onclick: () => { navigator.clipboard && navigator.clipboard.writeText(l.response).then(() => toast("已複製", "ok"), () => toast("無法複製，請手動選取", "bad")); } }, "複製")))
